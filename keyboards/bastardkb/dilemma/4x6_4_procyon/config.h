@@ -35,7 +35,7 @@
 #define I2C1_CLOCK_SPEED 1000000
 #define DIGITIZER_MOTION_PIN GP12
 #define DIGITIZER_MOTION_PIN_ACTIVE_LOW yes
-#define DIGITIZER_REPORT_FINGER_SIZE
+// #define DIGITIZER_REPORT_FINGER_SIZE  /* qmkfix test: liftoff-buffering causes at-rest jitter on mouse fallback */
 #define PROCYON_42_50
 
 /* Reset. */
