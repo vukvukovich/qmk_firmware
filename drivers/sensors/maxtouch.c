@@ -122,6 +122,14 @@
 #    define MXT_MOVE_HYSTERESIS_NEXT 4
 #endif
 
+#ifndef MXT_MOVE_SMOOTHING
+#    define MXT_MOVE_SMOOTHING 0
+#endif
+
+#ifndef MXT_MOVE_FILTER
+#    define MXT_MOVE_FILTER 0
+#endif
+
 #ifndef MXT_LOW_PASS_FILTER_COEFFICIENT
 #    define MXT_LOW_PASS_FILTER_COEFFICIENT 0
 #endif
@@ -429,8 +437,8 @@ void maxtouch_init(void) {
         cfg.mrgthr       = 5;  // Merge threshold
         cfg.mrghyst      = 10; // Merge threshold hysteresis
         cfg.mrgthradjstr = 20;
-        cfg.movsmooth    = 0; // The amount of smoothing applied to movements, this tails off at higher speeds
-        cfg.movfilter    = 0; // The lower 4 bits are the speed response value, higher values reduce lag, but also smoothing
+        cfg.movsmooth    = MXT_MOVE_SMOOTHING; // The amount of smoothing applied to movements, this tails off at higher speeds
+        cfg.movfilter    = MXT_MOVE_FILTER;    // The lower 4 bits are the speed response value, higher values reduce lag, but also smoothing
         // These two fields implement a simple filter for reducing jitter, but large values cause the pointer to stick in place before moving.
         cfg.movhysti     = MXT_MOVE_HYSTERESIS_INITIAL; // Initial movement hysteresis
         cfg.movhystn     = MXT_MOVE_HYSTERESIS_NEXT;  // Next movement hysteresis
@@ -478,6 +486,11 @@ void maxtouch_init(void) {
     }
 #endif
 }
+
+// Incremented on every finger touch-down. The mouse fallback watches this
+// to avoid diffing positions across a lift/re-touch (contact flicker
+// teleports the centroid; a delta across it is a phantom cursor jump).
+uint32_t maxtouch_contact_downs = 0;
 
 // Store state different from report so we can report MXT_DOWNUP as MXT_DOWN, but remember we are MXT_UP
 digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
@@ -536,7 +549,9 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                     digitizer_report.contacts[contact_id].width = message.data[6];
                     digitizer_report.contacts[contact_id].height = message.data[7];
 #endif
-                    // uprintf("EVT[%u] %d %d %ux%u %u\n", contact_id, event, type, x, y, ampl);
+#ifdef MAXTOUCH_EVENT_TRACE
+                    uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u\n", contact_id, event, type, x, y, ampl);
+#endif
 
                     switch (type) {
                         case MXT_FINGER:
@@ -556,6 +571,7 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
 #endif
                     if (type == MXT_FINGER) {
                         if (event == MXT_DOWN || event == MXT_MOVE) {
+                            if (event == MXT_DOWN) maxtouch_contact_downs++;
                             digitizer_report.contacts[contact_id].tip = true;
                         }
                     }
