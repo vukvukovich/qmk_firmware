@@ -75,21 +75,18 @@
 
 /* Rest clamp on top of the 1-euro filter: while the finger is judged at
  * rest, the cursor anchors and emits nothing (Apple-grade stillness).
- * Rest is detected from a SLOW EMA of the signed velocity - at rest the
- * noise velocities ping-pong and cancel toward zero, during a real slow
- * drag they all point one way and do not - so unlike a zero-delta or
- * magnitude test, this cannot re-arm mid-drag. On breakout the anchored
- * displacement is replayed over a few reports, never swallowed. */
+ * Rest is detected from the FILTERED position going nowhere: a candidate
+ * point plus a still timer. A slow coherent drag keeps outrunning the
+ * still radius and resetting the candidate, so it cannot re-arm and
+ * quantize mid-drag; a genuine stop arms within ~half a second. On
+ * breakout the anchored displacement is replayed motion-masked, never
+ * swallowed. */
 #    ifndef ONE_EURO_REST_RADIUS
 #        define ONE_EURO_REST_RADIUS 18.0f /* post-scale units the filtered position may wander while anchored */
 #    endif
 
-#    ifndef ONE_EURO_REST_VSLOW_CUTOFF
-#        define ONE_EURO_REST_VSLOW_CUTOFF 0.25f /* Hz; slow signed-velocity EMA for the rest detector */
-#    endif
-
-#    ifndef ONE_EURO_REST_V_THRESH
-#        define ONE_EURO_REST_V_THRESH 120.0f /* units/s; |vslow| sum below this counts as still */
+#    ifndef ONE_EURO_REST_STILL_RADIUS
+#        define ONE_EURO_REST_STILL_RADIUS 6.0f /* post-scale units of drift allowed while judging stillness */
 #    endif
 
 #    ifndef ONE_EURO_REST_MS
@@ -247,10 +244,10 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static uint32_t oe_last_run = 0;
     static float    oe_x = 0.0f, oe_y = 0.0f;         /* filtered position */
     static float    oe_dx = 0.0f, oe_dy = 0.0f;       /* filtered speed, units/s */
-    static float    oe_vsx = 0.0f, oe_vsy = 0.0f;     /* slow signed velocity (rest detector) */
     static float    oe_out_x = 0.0f, oe_out_y = 0.0f; /* last emitted position */
     static bool     rc_anchored = false;
     static float    rc_ax = 0.0f, rc_ay = 0.0f;       /* rest anchor */
+    static float    rc_cand_x = 0.0f, rc_cand_y = 0.0f; /* stillness candidate */
     static uint32_t rc_still_since = 0;
     static uint32_t rc_leak_t = 0;
     static float    rc_replay_x = 0.0f, rc_replay_y = 0.0f;
@@ -394,8 +391,6 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         oe_y        = (float)y;
                         oe_dx       = 0.0f;
                         oe_dy       = 0.0f;
-                        oe_vsx      = 0.0f;
-                        oe_vsy      = 0.0f;
                         oe_out_x    = oe_x;
                         oe_out_y    = oe_y;
                         oe_t_last   = now;
@@ -403,6 +398,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         rc_anchored    = true;
                         rc_ax          = oe_x;
                         rc_ay          = oe_y;
+                        rc_cand_x      = oe_x;
+                        rc_cand_y      = oe_y;
                         rc_still_since = 0;
                         rc_leak_t      = now;
                         rc_replay_x    = 0.0f;
@@ -425,13 +422,6 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         oe_dx += a_d * ((((float)x - oe_x) / te) - oe_dx);
                         oe_dy += a_d * ((((float)y - oe_y) / te) - oe_dy);
 
-                        /* Much slower EMA of the SIGNED velocity: rest noise
-                         * cancels itself here, coherent slow motion does not.
-                         * This is the rest/move classifier. */
-                        const float a_s = oe_alpha(te, ONE_EURO_REST_VSLOW_CUTOFF);
-                        oe_vsx += a_s * (oe_dx - oe_vsx);
-                        oe_vsy += a_s * (oe_dy - oe_vsy);
-
                         oe_x += oe_alpha(te, one_euro_mincutoff + one_euro_beta * fabsf(oe_dx)) * ((float)x - oe_x);
                         oe_y += oe_alpha(te, one_euro_mincutoff + one_euro_beta * fabsf(oe_dy)) * ((float)y - oe_y);
                     }
@@ -443,7 +433,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                             /* breakout: hand the anchored displacement to the
                              * replay drain - nothing is ever swallowed */
                             rc_anchored    = false;
-                            rc_still_since = 0;
+                            rc_cand_x      = oe_x;
+                            rc_cand_y      = oe_y;
+                            rc_still_since = now | 1;
                             rc_replay_x    = ex;
                             rc_replay_y    = ey;
 #ifdef MAXTOUCH_EVENT_TRACE
@@ -463,25 +455,27 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         }
                     }
                     if (!(one_euro_rest_clamp && rc_anchored)) {
-                        /* re-arm only when the slow signed velocity says the
-                         * finger is genuinely still - a slow coherent drag
-                         * keeps this high, so it cannot quantize mid-drag */
-                        if (fabsf(oe_vsx) + fabsf(oe_vsy) < ONE_EURO_REST_V_THRESH) {
-                            if (rc_still_since == 0) {
-                                rc_still_since = now | 1;
-                            } else if (timer_elapsed32(rc_still_since) > ONE_EURO_REST_MS) {
-                                rc_anchored    = true;
-                                rc_ax          = oe_x;
-                                rc_ay          = oe_y;
-                                rc_leak_t      = now;
-                                rc_replay_x    = 0.0f;
-                                rc_replay_y    = 0.0f;
+                        /* re-arm when the FILTERED position stops going
+                         * anywhere: within the still radius of the candidate
+                         * point for the rest interval. A slow coherent drag
+                         * keeps outrunning the radius and resetting the
+                         * candidate, so it cannot quantize mid-drag. */
+                        const float cdx = oe_x - rc_cand_x;
+                        const float cdy = oe_y - rc_cand_y;
+                        if (cdx * cdx + cdy * cdy > ONE_EURO_REST_STILL_RADIUS * ONE_EURO_REST_STILL_RADIUS || rc_still_since == 0) {
+                            rc_cand_x      = oe_x;
+                            rc_cand_y      = oe_y;
+                            rc_still_since = now | 1;
+                        } else if (timer_elapsed32(rc_still_since) > ONE_EURO_REST_MS) {
+                            rc_anchored = true;
+                            rc_ax       = oe_x;
+                            rc_ay       = oe_y;
+                            rc_leak_t   = now;
+                            rc_replay_x = 0.0f;
+                            rc_replay_y = 0.0f;
 #ifdef MAXTOUCH_EVENT_TRACE
-                                uprintf("ANC %d,%d\n", (int)oe_x, (int)oe_y);
+                            uprintf("ANC %d,%d\n", (int)oe_x, (int)oe_y);
 #endif
-                            }
-                        } else {
-                            rc_still_since = 0;
                         }
                         oe_drain_replay(&rc_replay_x, oe_x - oe_out_x, &oe_out_x);
                         oe_drain_replay(&rc_replay_y, oe_y - oe_out_y, &oe_out_y);
