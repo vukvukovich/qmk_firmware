@@ -313,6 +313,14 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                 dilemma_set_pointer_dragscroll_enabled(!dilemma_get_pointer_dragscroll_enabled());
             }
             break;
+#        if defined(POINTING_DEVICE_DRIVER_digitizer)
+        case NATURAL_SCROLL_TOGGLE:
+            if (record->event.pressed) {
+                extern bool digitizer_natural_scroll;
+                digitizer_natural_scroll = !digitizer_natural_scroll;
+            }
+            break;
+#        endif // POINTING_DEVICE_DRIVER_digitizer
     }
 #        endif // !NO_DILEMMA_KEYCODES
 #    endif     // POINTING_DEVICE_ENABLE
