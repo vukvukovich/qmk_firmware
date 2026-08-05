@@ -35,7 +35,19 @@
 #define I2C1_CLOCK_SPEED 1000000
 #define DIGITIZER_MOTION_PIN GP12
 #define DIGITIZER_MOTION_PIN_ACTIVE_LOW yes
-// #define DIGITIZER_REPORT_FINGER_SIZE  /* qmkfix test: liftoff-buffering causes at-rest jitter on mouse fallback */
+// #define DIGITIZER_REPORT_FINGER_SIZE  /* the liftoff-buffering path causes at-rest jitter on the mouse fallback */
+
+/* The trackpad module lives on the right half; sync its raw contact
+ * state over the split link so the trackpad works whichever half is
+ * plugged in. The master runs the full processing pipeline on the
+ * synced contacts, so the parent Dilemma config's mouse-report relay
+ * (SPLIT_POINTING) must be off: it is a lossy state sync that drops
+ * wheel clicks emitted between link polls. Absolute contact positions
+ * lose nothing when frames skip. */
+#define SPLIT_DIGITIZER_ENABLE
+#define DIGITIZER_RIGHT
+#undef SPLIT_POINTING_ENABLE
+#undef POINTING_DEVICE_RIGHT
 #define PROCYON_42_50
 
 /* Reset. */

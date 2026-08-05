@@ -234,7 +234,13 @@ bool digitizer_task(void) {
 #endif
 
 #if defined(DIGITIZER_MOTION_PIN)
+#    if defined(SPLIT_DIGITIZER_ENABLE)
+    /* the motion pin exists only on the digitizer's half - the other
+     * half consumes the shared report unconditionally */
+    if (!(DIGITIZER_THIS_SIDE) || digitizer_motion_detected())
+#    else
     if (digitizer_motion_detected())
+#    endif
 #endif
     {
 #if DIGITIZER_FINGER_COUNT > 0
@@ -323,11 +329,15 @@ bool digitizer_task(void) {
         host_digitizer_stylus_send(&stylus_report);
     }
 #endif
-    if (report.contact_count || button_state_changed || gesture_changed) {
+    if ((report.contact_count || button_state_changed || gesture_changed) && is_keyboard_master()) {
 #if defined(POINTING_DEVICE_DRIVER_digitizer)
         // We may get here because we read a new digitizer report, or because
         // a timeout on a gesture occured. If a timeout occured use the last known
         // digitizer state. Otherwise send the new state for processing.
+        // Only the master processes: it has the contacts (local hardware or
+        // the split digitizer sync) and owns both the mouse output and the
+        // gesture keycodes. A digitizer half acting as slave only feeds raw
+        // contact state over the link.
         if (report_changed) {
             last_report = report;
             digitizer_update_mouse_report(&report);
