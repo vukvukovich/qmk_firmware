@@ -32,7 +32,7 @@
 #    endif
 
 #    ifndef DIGITIZER_SCROLL_INTERVAL_MS
-#        define DIGITIZER_SCROLL_INTERVAL_MS 50 /* wheel event cadence; physical wheels click at 10-20 Hz */
+#        define DIGITIZER_SCROLL_INTERVAL_MS 50 /* emission tick; the divisor, not the tick, sets the speed */
 #    endif
 
 /* Fingers of a two-finger gesture never land or lift simultaneously.
@@ -48,11 +48,12 @@
 #        define DIGITIZER_MOUSE_SCROLL_END_GRACE_MS 150
 #    endif
 
-/* Scroll is emitted the way a physical wheel works: every event is
- * exactly ONE click, and speed lives in the rhythm between clicks
- * (multi-click events proved unphysical - they overflowed the 8-bit
- * field and macOS largely ignores magnitude anyway). The accumulator
- * is clamped so a backlog can never outlive the gesture. */
+/* Scroll emission is LINEAR: travel/divisor clicks per tick, magnitude
+ * intact, remainder carried - designed for a host-side pixel renderer
+ * (each click = fixed pixels) that keeps the OS's per-click line
+ * inflation and rate acceleration out of the path. The accumulator is
+ * clamped so a backlog can never outlive the gesture: a flick's excess
+ * speed lives on as coast velocity instead of queued clicks. */
 
 /* Teleport rejection: while a second finger descends, the sensor's
  * tracker sometimes snaps an existing contact to the incoming finger's
@@ -219,9 +220,6 @@ static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report) {
         // Retain the button state, but drop any motion.
         memset(&mouse_report, 0, sizeof(report_mouse_t));
         mouse_report.buttons = report.buttons;
-#ifdef MAXTOUCH_EVENT_TRACE
-        if (report.h || report.v) uprintf("WHEEL h=%d v=%d\n", report.h, report.v);
-#endif
         return report;
     }
     return _mouse_report;
@@ -313,9 +311,12 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static uint32_t scroll_click_t = 0; /* time of the previous emitted click */
     static uint32_t scroll_last_t = 0;  /* last time the 2-finger scroll branch ran */
     static bool     scroll_touched = false;
+    static bool     scroll_clicked = false; /* did this gesture emit any scroll? */
+    static uint32_t two_seen_t = 0; /* last time two or more contacts were present */
     static int      sc_cx = 0, sc_cy = 0; /* previous scroll centroid */
     static int      sc_n = 0;             /* finger count it was valid for */
     static bool     scr_anch = false;     /* scroll rest anchor (wiggle absorber) */
+    static bool     scr_esc = false;      /* anchor already escaped this gesture */
     static int      scr_ax = 0, scr_ay = 0;
     static int      scr_cand_x = 0, scr_cand_y = 0;
     static uint32_t scr_still_t = 0;
@@ -377,6 +378,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     } else {
         tri_t = 0;
     }
+    if (contacts >= 2) two_seen_t = timer_read32() | 1;
     const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
 
     switch (state) {
@@ -391,6 +393,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 coast_v16h         = 0;
                 coast_v16v         = 0;
                 scroll_coasting    = false;
+                scroll_clicked     = false;
+                scr_esc            = false;
                 state              = Down;
                 contact_start_time = timer_read32();
                 contact_start_x    = x;
@@ -402,6 +406,12 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         case Down: {
             const uint16_t distance_x = abs(contact_start_x - x);
             const uint16_t distance_y = abs(contact_start_y - y);
+            /* Apple-style stagger tolerance: the tap window restarts when
+             * another finger lands, so a slightly-delayed second finger
+             * still yields a clean two-finger tap. */
+            if (contacts > tap_contacts) {
+                contact_start_time = timer_read32();
+            }
             tap_contacts              = MAX(contacts, tap_contacts);
 
             if (contacts == 0) {
@@ -431,13 +441,22 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         case Drag:
         case MoveScroll: {
             if (contacts == 0) {
-                state = None;
+                const State prior = state;
+                state             = None;
                 /* coast only engages when the fingers left MID-MOTION:
                  * a gesture that stopped before lifting has a stale last
                  * click and must leave no momentum */
                 if (timer_elapsed32(scroll_click_t) > 250) {
                     coast_v16h = 0;
                     coast_v16v = 0;
+                }
+                /* Tap salvage: two fingers LANDING wobble enough to get
+                 * promoted to MoveScroll, which used to silently eat the
+                 * tap. Judge at lift, like Apple: brief touch, nothing
+                 * scrolled - it was a right-click tap all along. */
+                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && duration < DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT) {
+                    state              = Tapped;
+                    contact_start_time = timer_read32();
                 }
             } else if (contacts == 1) {
 #if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
@@ -563,7 +582,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                      * break: a scroll must never begin or end with a pointer
                      * jump. Travel accumulated during grace replays through
                      * the normal motion-masked breakout afterward. */
-                    const bool tf_grace = duration < DIGITIZER_MOUSE_TOUCH_GRACE_MS || timer_elapsed32(scroll_last_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS;
+                    const bool tf_grace = duration < DIGITIZER_MOUSE_TOUCH_GRACE_MS || timer_elapsed32(scroll_last_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS || (two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS);
                     if (one_euro_rest_clamp && rc_anchored) {
                         const float ex = oe_x - rc_ax;
                         const float ey = oe_y - rc_ay;
@@ -636,13 +655,6 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             } else if (contacts == 3 && tri_sustained && duration < DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
                 state = Swipe;
             } else {
-                /* Wheel events are throttled to physical-wheel cadence.
-                 * The sensor reports ~90 times a second; a wheel event per
-                 * report saturates the host's scroll acceleration, which
-                 * then ignores event magnitude entirely (measured: 120x
-                 * unit changes were imperceptible on macOS, as was the
-                 * host's own speed setting). Accumulate travel and release
-                 * it at most once per interval, like a real wheel. */
                 scroll_last_t  = timer_read32();
                 scroll_touched = true;
                 /* Scroll follows the CENTROID of the fingers: the tracker
@@ -656,11 +668,10 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     sc_n        = contacts;
                     sc_cx       = cx;
                     sc_cy       = cy;
-                    /* fresh finger set starts ANCHORED: rolling or wiggling
-                     * fingers around the touch point shifts the centroid
-                     * without intent - absorbed until coherent travel
-                     * breaks out (Apple pads gate scroll the same way) */
-                    scr_anch    = true;
+                    /* fresh gesture starts ANCHORED (wiggle absorber),
+                     * EXCEPT during rapid successive scrolling, and never
+                     * re-arms mid-gesture once escaped (count flapping) */
+                    scr_anch    = timer_elapsed32(scroll_click_t) > 500 && !scr_esc;
                     scr_ax      = cx;
                     scr_ay      = cy;
                     scr_still_t = 0;
@@ -670,6 +681,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     const int ady = cy - scr_ay;
                     if (adx * adx + ady * ady > 25 * 25) {
                         scr_anch = false; /* deliberate travel: scroll begins here */
+                        scr_esc  = true;
                     }
                 } else {
                     /* re-arm on stillness so a held pause absorbs wiggle again */
@@ -716,6 +728,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     if (abs(scroll_acc_v) >= 2 * abs(scroll_acc_h)) sh = 0;
                     else if (abs(scroll_acc_h) >= 2 * abs(scroll_acc_v)) sv = 0;
                     if (sh || sv) {
+                        scroll_clicked = true;
                         scroll_acc_h -= sh * (int)digitizer_scroll_divisor;
                         scroll_acc_v -= sv * (int)digitizer_scroll_divisor;
                         /* velocity in clicks/s x16, from clicks over the gap
