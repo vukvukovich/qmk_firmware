@@ -37,7 +37,7 @@ typedef struct PACKED {
 
 typedef struct PACKED {
     unsigned char report_id;
-#ifdef DIGITIZER_REPORT_FINGER_SIZE
+#if defined(DIGITIZER_REPORT_FINGER_SIZE) || defined(MXT_REPORT_CONTACT_SIZE)
     unsigned char data[8];
 #else
     unsigned char data[6];

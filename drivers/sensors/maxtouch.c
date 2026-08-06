@@ -62,6 +62,21 @@
 #    define MXT_TOUCH_THRESHOLD 18
 #endif
 
+// Blob merge tuning: MRGTHR decides how readily two adjacent touch
+// peaks merge into a single reported contact. The stock 5 merges very
+// eagerly - close fingers become one blob (breaking two-finger scroll
+// and taps); raising it keeps them separate. Too high risks splitting
+// one real finger into phantom twins.
+#ifndef MXT_MERGE_THRESHOLD
+#    define MXT_MERGE_THRESHOLD 5
+#endif
+#ifndef MXT_MERGE_HYSTERESIS
+#    define MXT_MERGE_HYSTERESIS 10
+#endif
+#ifndef MXT_MERGE_ADJ_STRENGTH
+#    define MXT_MERGE_ADJ_STRENGTH 20
+#endif
+
 #ifndef MXT_GAIN
 #    define MXT_GAIN 4
 #endif
@@ -415,8 +430,8 @@ void maxtouch_init(void) {
         cfg.cfg1         = rotation;
         cfg.scraux       = 0x7;                                             // AUX data: Report the number of touch events, touch area, anti touch area
         cfg.tchaux       = 0x2;                                             // report amplitude
-#ifdef DIGITIZER_REPORT_FINGER_SIZE
-        cfg.tchaux       |= 0x8;
+#if defined(DIGITIZER_REPORT_FINGER_SIZE) || defined(MXT_REPORT_CONTACT_SIZE)
+        cfg.tchaux       |= 0x8; // height/width aux bytes
 #endif
         cfg.tcheventcfg  = 24;                                              // Disable reporting suppressed events
         cfg.numtch       = DIGITIZER_CONTACT_COUNT;                         // The number of touch reports we want to receive (upto 10)
@@ -434,9 +449,9 @@ void maxtouch_init(void) {
         cfg.tchhyst      = MXT_TOUCH_HYST;
         cfg.intthr       = MXT_INTERNAL_TOUCH_THRESHOLD;
         cfg.intthryst    = MXT_INTERNAL_TOUCH_HYST;
-        cfg.mrgthr       = 5;  // Merge threshold
-        cfg.mrghyst      = 10; // Merge threshold hysteresis
-        cfg.mrgthradjstr = 20;
+        cfg.mrgthr       = MXT_MERGE_THRESHOLD;      // Merge threshold: higher = tracker keeps close touches separate
+        cfg.mrghyst      = MXT_MERGE_HYSTERESIS;     // Merge threshold hysteresis
+        cfg.mrgthradjstr = MXT_MERGE_ADJ_STRENGTH;
         cfg.movsmooth    = MXT_MOVE_SMOOTHING; // The amount of smoothing applied to movements, this tails off at higher speeds
         cfg.movfilter    = MXT_MOVE_FILTER;    // The lower 4 bits are the speed response value, higher values reduce lag, but also smoothing
         // These two fields implement a simple filter for reducing jitter, but large values cause the pointer to stick in place before moving.
@@ -550,7 +565,11 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                     digitizer_report.contacts[contact_id].height = message.data[7];
 #endif
 #ifdef MAXTOUCH_EVENT_TRACE
+#    if defined(DIGITIZER_REPORT_FINGER_SIZE) || defined(MXT_REPORT_CONTACT_SIZE)
+                    uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u w=%u h=%u\n", contact_id, event, type, x, y, ampl, message.data[6], message.data[7]);
+#    else
                     uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u\n", contact_id, event, type, x, y, ampl);
+#    endif
 #endif
 
                     switch (type) {
