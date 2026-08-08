@@ -209,6 +209,7 @@ static uint16_t t46_cte_config_address                       = 0;
 static uint16_t t47_proci_stylus_address                     = 0;
 static uint16_t t56_proci_shieldless_address                 = 0;
 static uint16_t t65_proci_lensbending_address                = 0;
+static uint16_t t72_noisesuppression_address                 = 0;
 static uint16_t t80_proci_retransmissioncompensation_address = 0;
 static uint16_t t100_multiple_touch_touchscreen_address      = 0;
 
@@ -294,6 +295,9 @@ void maxtouch_init(void) {
                     case 56:
                         t56_proci_shieldless_address = address;
                         break;
+                    case 72:
+                        t72_noisesuppression_address = address;
+                        break;
                     case 65:
                         t65_proci_lensbending_address = address;
                         break;
@@ -354,6 +358,18 @@ void maxtouch_init(void) {
 
         i2c_write_register16(MXT336UD_ADDRESS, t8_acquisitionconfig_address, (uint8_t *)&t8, sizeof(mxt_gen_acquisitionconfig_t8), MXT_I2C_TIMEOUT_MS);
     }
+
+#ifdef MXT_NOISE_SUPPRESSION
+    /* T72 dynamic noise suppression (charger noise). Full register map
+     * is NDA; CTRL bit0 = ENABLE is the maXTouch-wide convention, all
+     * other fields stay at chip defaults. Volatile - rewritten every
+     * boot, removed by dropping the define. */
+    if (t72_noisesuppression_address) {
+        uint8_t t72_ctrl = 1;
+        i2c_write_register16(MXT336UD_ADDRESS, t72_noisesuppression_address, &t72_ctrl, 1, MXT_I2C_TIMEOUT_MS);
+    }
+#endif
+
 
 #ifdef DIGITIZER_HAS_STYLUS
     if (t42_proci_touchsupression_address) {
@@ -660,6 +676,7 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
             }
         }
     }
+    digitizer_report.contact_downs = maxtouch_contact_downs;
     return digitizer_report;
 }
 

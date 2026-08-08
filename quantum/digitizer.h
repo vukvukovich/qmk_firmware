@@ -46,6 +46,11 @@ typedef struct {
 
 typedef struct {
     digitizer_contact_t contacts[DIGITIZER_CONTACT_COUNT];
+    /* Total finger touch-downs since boot, from the sensor driver.
+     * Synced across the split link so a master on either half can
+     * reseed its filters on contact re-registration (an unsynced
+     * counter made left-plugged landings slide the cursor). */
+    uint32_t contact_downs;
     union {
         uint8_t buttons;
         struct {

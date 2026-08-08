@@ -55,6 +55,17 @@
 #        define DIGITIZER_MOUSE_SCROLL_END_GRACE_MS 150
 #    endif
 
+/* Close fingers periodically MERGE into one tracker contact (electrode
+ * pitch; measured ~15% of frames even at tuned gain). A merge during an
+ * engaged scroll must not stall it: route the lone blob through the
+ * scroll path while a pair was seen recently - the blob's centroid
+ * tracks the fingers, and the finger-count resync absorbs the 2->1
+ * centroid jump. Window unrefreshed: a true single finger regains the
+ * pointer after this long. */
+#    ifndef DIGITIZER_MOUSE_MERGE_SCROLL_MS
+#        define DIGITIZER_MOUSE_MERGE_SCROLL_MS 800
+#    endif
+
 /* Scroll emission is LINEAR: travel/divisor clicks per tick, magnitude
  * intact, remainder carried - designed for a host-side pixel renderer
  * (each click = fixed pixels) that keeps the OS's per-click line
@@ -389,6 +400,29 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         }
     }
 
+    /* 3-tap median on the tracked position: deletes single-report
+     * position impulses outright (measured X snaps of 100-1800 units on
+     * a still finger, environment-dependent) which the low-pass filter
+     * would smear into visible wander and the teleport gate only
+     * catches above 100 units. Costs one sensor report (~8ms). */
+    {
+        static uint16_t med_x[3], med_y[3];
+        static uint8_t  med_n = 0;
+        if (contacts == 1) {
+            med_x[0] = med_x[1]; med_x[1] = med_x[2]; med_x[2] = x;
+            med_y[0] = med_y[1]; med_y[1] = med_y[2]; med_y[2] = y;
+            if (med_n < 3) med_n++;
+            if (med_n == 3) {
+#define MED3(a, b, c) MAX(MIN(a, b), MIN(MAX(a, b), c))
+                x = MED3(med_x[0], med_x[1], med_x[2]);
+                y = MED3(med_y[0], med_y[1], med_y[2]);
+#undef MED3
+            }
+        } else {
+            med_n = 0;
+        }
+    }
+
     /* A third contact only counts as a swipe when SUSTAINED: heavy slow
      * fingers momentarily split into phantom contacts (single-report
      * blips) that must never fire Spaces switches mid-scroll. */
@@ -484,7 +518,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     contact_start_time = timer_read32();
                 }
                 uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
-            } else if (contacts == 1) {
+            } else if (contacts == 1 && !((scr_esc || (tap_contacts >= 2 && duration < 500)) && two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS)) {
 #if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
                 // Reset our liftoff detection state if the number of contacts changed
                 if (contacts != last_contacts)
@@ -728,6 +762,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 if (!scr_anch) {
                     scroll_acc_h += (cx - sc_cx) * DIGITIZER_SCROLL_SCALE;
                     scroll_acc_v += (cy - sc_cy) * DIGITIZER_SCROLL_SCALE;
+                    /* a MERGED blob that keeps travelling keeps the scroll
+                     * alive: control returns to the pointer on stillness
+                     * or lift, never mid-motion (no cursor jumping out of
+                     * a close-finger scroll) */
+                    if (contacts == 1 && (abs(cx - sc_cx) > 2 || abs(cy - sc_cy) > 2)) two_seen_t = timer_read32() | 1;
                 }
                 sc_cx = cx;
                 sc_cy = cy;

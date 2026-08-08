@@ -75,6 +75,7 @@ digitizer_t        digitizer_get_state(void) {
 #    endif
 
 digitizer_t shared_digitizer_report = {};
+static bool shared_report_fresh     = false;
 
 /**
  * @brief Sets the shared digitizer report used by digitizer device task
@@ -85,6 +86,7 @@ digitizer_t shared_digitizer_report = {};
  */
 void digitizer_set_shared_report(digitizer_t report) {
     shared_digitizer_report = report;
+    shared_report_fresh     = true;
 }
 #endif // defined(SPLIT_DIGITIZER_ENABLE)
 
@@ -235,9 +237,14 @@ bool digitizer_task(void) {
 
 #if defined(DIGITIZER_MOTION_PIN)
 #    if defined(SPLIT_DIGITIZER_ENABLE)
-    /* the motion pin exists only on the digitizer's half - the other
-     * half consumes the shared report unconditionally */
-    if (!(DIGITIZER_THIS_SIDE) || digitizer_motion_detected())
+    /* the motion pin exists only on the digitizer's half. The other
+     * half must process only FRESH frames from the link: re-running the
+     * pipeline on the same frame every matrix scan (~8x per sensor
+     * report) defeats impulse filtering and starves filter timestamps -
+     * the historic "left half never as smooth" asymmetry. */
+    bool process_frame = DIGITIZER_THIS_SIDE ? digitizer_motion_detected() : shared_report_fresh;
+    shared_report_fresh = false;
+    if (process_frame)
 #    else
     if (digitizer_motion_detected())
 #    endif
@@ -249,6 +256,11 @@ bool digitizer_task(void) {
 #if defined(SPLIT_DIGITIZER_ENABLE)
 #    if defined(DIGITIZER_LEFT) || defined(DIGITIZER_RIGHT)
         digitizer_t driver_state = DIGITIZER_THIS_SIDE ? (digitizer_driver.get_report ? digitizer_driver.get_report(digitizer_state) : digitizer_state) : shared_digitizer_report;
+        /* Propagate the sensor half's touch-down counter to whichever
+         * half is master, so filter reseed on re-registration works
+         * plugged into either side. */
+        extern uint32_t maxtouch_contact_downs;
+        maxtouch_contact_downs = driver_state.contact_downs;
 #    else
 #        error "You need to define the side(s) the digitizer is on. DIGITIZER_LEFT / DIGITIZER_RIGHT"
 #    endif
