@@ -514,9 +514,27 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
 
         i2c_status_t status = i2c_read_register16(MXT336UD_ADDRESS, t44_message_count_address, (uint8_t *)&message_count, sizeof(mxt_message_count), MXT_I2C_TIMEOUT_MS);
         if (status == I2C_STATUS_SUCCESS) {
-            for (int i = 0; i < message_count.count; i++) {
+            /* A corrupt count would read past the FIFO into stale/invalid
+             * messages - clamp to the chip's realistic maximum. */
+            uint8_t pending = message_count.count;
+            if (pending > 48) {
+                uprintf("IERR count=%u\n", pending);
+                pending = 48;
+            }
+            for (int i = 0; i < pending; i++) {
                 mxt_message message = {};
                 status              = i2c_read_register16(MXT336UD_ADDRESS, t5_message_processor_address, (uint8_t *)&message, sizeof(mxt_message), MXT_I2C_TIMEOUT_MS);
+
+                /* A failed or partial read leaves zeroed/garbage bytes that
+                 * would otherwise be decoded as touch data: truncated high
+                 * bytes read as position teleports, zeroed amplitudes as
+                 * liftoffs, corrupt report ids as phantom contacts. Never
+                 * decode an unverified buffer; retry next cycle. */
+                if (status != I2C_STATUS_SUCCESS) {
+                    static uint32_t i2c_err_n = 0;
+                    uprintf("IERR t5 n=%lu\n", ++i2c_err_n);
+                    break;
+                }
 
                 if (message.report_id == t100_first_report_id) {
                     const uint8_t  fingers  = message.data[1];
@@ -553,7 +571,7 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                             uprintf("Signal limit fault detected\n");
                             break;
                     }
-                } else if ((message.report_id >= t100_subsequent_report_ids[0]) && (message.report_id <= t100_subsequent_report_ids[t100_num_reports - 1])) {
+                } else if (t100_num_reports != 0 && (message.report_id >= t100_subsequent_report_ids[0]) && (message.report_id <= t100_subsequent_report_ids[t100_num_reports - 1])) {
                     const uint8_t  contact_id = message.report_id - t100_subsequent_report_ids[0];
                     const int      event      = (message.data[0] & 0xf);
                     const int      type       = (message.data[0] >> 4) & 0x7;
