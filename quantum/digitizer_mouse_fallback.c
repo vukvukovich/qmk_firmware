@@ -160,6 +160,16 @@ bool digitizer_natural_scroll = false;
 uint8_t  digitizer_scroll_divisor     = DIGITIZER_SCROLL_DIVISOR;
 uint16_t digitizer_scroll_interval_ms = DIGITIZER_SCROLL_INTERVAL_MS;
 
+// Swipe dispatch, keymap-overridable (see digitizer_mouse_fallback.h).
+__attribute__((weak)) void digitizer_swipe_action(digitizer_swipe_dir_t dir) {
+    switch (dir) {
+        case DIGITIZER_SWIPE_DIR_RIGHT: tap_code16(DIGITIZER_SWIPE_RIGHT_KC); break;
+        case DIGITIZER_SWIPE_DIR_LEFT: tap_code16(DIGITIZER_SWIPE_LEFT_KC); break;
+        case DIGITIZER_SWIPE_DIR_DOWN: tap_code16(DIGITIZER_SWIPE_DOWN_KC); break;
+        case DIGITIZER_SWIPE_DIR_UP: tap_code16(DIGITIZER_SWIPE_UP_KC); break;
+    }
+}
+
 /* With hi-res scrolling the host treats wheel units as 1/RESOLUTION of
  * a detent, so finger travel is scaled up by the resolution instead of
  * being crushed into whole detents - the host then pixel-scrolls
@@ -799,28 +809,28 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             } else if (force_digitizer_send_mouse_reports || digitizer_send_mouse_reports) {
                 if (distance_x > DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_y) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe right
-                    tap_code16(DIGITIZER_SWIPE_RIGHT_KC);
+                    digitizer_swipe_action(DIGITIZER_SWIPE_DIR_RIGHT);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
                     uprintf("SWIPE right\n");
 #endif
                 } else if (distance_x < -DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_y) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe left
-                    tap_code16(DIGITIZER_SWIPE_LEFT_KC);
+                    digitizer_swipe_action(DIGITIZER_SWIPE_DIR_LEFT);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
                     uprintf("SWIPE left\n");
 #endif
                 } else if (distance_y > DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_x) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe down
-                    tap_code16(DIGITIZER_SWIPE_DOWN_KC);
+                    digitizer_swipe_action(DIGITIZER_SWIPE_DIR_DOWN);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
                     uprintf("SWIPE down\n");
 #endif
                 } else if (distance_y < -DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_x) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe up
-                    tap_code16(DIGITIZER_SWIPE_UP_KC);
+                    digitizer_swipe_action(DIGITIZER_SWIPE_DIR_UP);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
                     uprintf("SWIPE up\n");
