@@ -19,6 +19,13 @@
 #        define DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT 150
 #    endif
 
+/* Two-finger tap judged at lift: window measured from when the PAIR
+ * formed (not the first finger), so a staggered second finger still
+ * right-clicks. Wider than the one-finger window, like Apple. */
+#    ifndef DIGITIZER_MOUSE_TAP_SALVAGE_MS
+#        define DIGITIZER_MOUSE_TAP_SALVAGE_MS 250
+#    endif
+
 #    ifndef DIGITIZER_MOUSE_TAP_DURATION
 #        define DIGITIZER_MOUSE_TAP_DURATION 1
 #    endif
@@ -313,6 +320,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static bool     scroll_touched = false;
     static bool     scroll_clicked = false; /* did this gesture emit any scroll? */
     static uint32_t two_seen_t = 0; /* last time two or more contacts were present */
+    static uint32_t pair_t     = 0; /* when the contact count last rose to two */
+    static int      prev_n     = 0; /* contact count on the previous report */
     static int      sc_cx = 0, sc_cy = 0; /* previous scroll centroid */
     static int      sc_n = 0;             /* finger count it was valid for */
     static bool     scr_anch = false;     /* scroll rest anchor (wiggle absorber) */
@@ -379,6 +388,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         tri_t = 0;
     }
     if (contacts >= 2) two_seen_t = timer_read32() | 1;
+    if (contacts >= 2 && prev_n < 2) pair_t = timer_read32() | 1;
+    prev_n = contacts;
     const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
 
     switch (state) {
@@ -417,6 +428,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             if (contacts == 0) {
                 state              = Tapped;
                 contact_start_time = timer_read32();
+                uprintf("TAPJ down tc=%d dur=%lu -> tap\n", tap_contacts, duration);
             } else if (contacts > 3 || (contacts == 3 && tri_sustained)) {
                 state = Swipe;
             } else if (contacts == 2) {
@@ -440,6 +452,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         }
         case Drag:
         case MoveScroll: {
+            /* a second finger arriving after the Down state has passed
+             * must still count toward the tap-at-lift judgement */
+            tap_contacts = MAX(contacts, tap_contacts);
             if (contacts == 0) {
                 const State prior = state;
                 state             = None;
@@ -454,10 +469,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                  * promoted to MoveScroll, which used to silently eat the
                  * tap. Judge at lift, like Apple: brief touch, nothing
                  * scrolled - it was a right-click tap all along. */
-                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && duration < DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT) {
+                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS) {
                     state              = Tapped;
                     contact_start_time = timer_read32();
                 }
+                uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
             } else if (contacts == 1) {
 #if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
                 // Reset our liftoff detection state if the number of contacts changed
