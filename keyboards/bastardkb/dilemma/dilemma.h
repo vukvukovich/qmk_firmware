@@ -31,6 +31,9 @@ enum dilemma_keycodes {
     DRAGSCROLL_MODE,
     DRAGSCROLL_MODE_TOGGLE,
     NATURAL_SCROLL_TOGGLE,
+    THREE_FINGER_DRAG_TOGGLE,
+    THREE_FINGER_DRAG_MOMENTARY,
+    TRACE_MARK,
 };
 
 #        define DPI_MOD POINTER_DEFAULT_DPI_FORWARD
@@ -42,6 +45,9 @@ enum dilemma_keycodes {
 #        define DRGSCRL DRAGSCROLL_MODE
 #        define DRG_TOG DRAGSCROLL_MODE_TOGGLE
 #        define NAT_TOG NATURAL_SCROLL_TOGGLE
+#        define TFD_TOG THREE_FINGER_DRAG_TOGGLE
+#        define TFD_MO THREE_FINGER_DRAG_MOMENTARY
+#        define TR_MARK TRACE_MARK
 #    endif // !NO_DILEMMA_KEYCODES
 
 /** \brief Return the current DPI value for the pointer's default mode. */

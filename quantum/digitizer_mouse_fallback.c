@@ -175,6 +175,23 @@ float one_euro_mincutoff = ONE_EURO_MINCUTOFF;
 float one_euro_beta      = ONE_EURO_BETA;
 bool  one_euro_rest_clamp = true;
 
+// Three-finger drag (Apple's accessibility gesture): three sustained
+// fingers hold the left button and move the pointer via the centroid.
+// Runtime-toggleable; swipes are gated off while active.
+#    ifdef DIGITIZER_THREE_FINGER_DRAG
+bool digitizer_three_finger_drag = true;
+#    else
+bool digitizer_three_finger_drag = false;
+#    endif
+
+// Gesture journal, runtime-toggleable (VIA checkbox): contact-count
+// changes, state transitions, tap judgments - a few lines per gesture.
+#    ifdef DIGITIZER_MOUSE_GESTURE_TRACE
+bool digitizer_gesture_trace = true;
+#    else
+bool digitizer_gesture_trace = false;
+#    endif
+
 // Natural (content-follows-finger) scroll direction, as on Apple
 // trackpads. Runtime-toggleable; keymaps can default it from OS detection.
 #    ifdef DIGITIZER_NATURAL_SCROLL
@@ -188,6 +205,7 @@ bool digitizer_natural_scroll = false;
 // by event rate and largely ignores magnitude (measured: 120x magnitude
 // changes imperceptible, rate changes always felt). Both runtime.
 uint8_t  digitizer_scroll_divisor     = DIGITIZER_SCROLL_DIVISOR;
+uint8_t  digitizer_pointer_scale_pct  = DIGITIZER_MOUSE_POINTER_SCALE_PCT;
 uint16_t digitizer_scroll_interval_ms = DIGITIZER_SCROLL_INTERVAL_MS;
 
 // Swipe dispatch, keymap-overridable (see digitizer_mouse_fallback.h).
@@ -355,12 +373,16 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static float    oe_dx = 0.0f, oe_dy = 0.0f;       /* filtered speed, units/s */
     static float    oe_out_x = 0.0f, oe_out_y = 0.0f; /* last emitted position */
     static int      scroll_acc_h = 0, scroll_acc_v = 0;
-    static uint32_t scroll_click_t = 0; /* time of the previous emitted click */
+    static uint32_t scroll_click_t = 0; /* time of the previous emitted click (touch OR coast - the shared rhythm clock) */
+    static uint32_t touch_click_t  = 0; /* last click driven by FINGERS only - coast never updates it (it must not arm the rescroll presumption: pointing right after a flick is not a rescroll) */
     static uint32_t scroll_last_t = 0;  /* last time the 2-finger scroll branch ran */
     static bool     scroll_touched = false;
     static bool     scroll_clicked = false; /* did this gesture emit any scroll? */
     static uint32_t two_seen_t = 0; /* last time two or more contacts were present */
     static uint32_t pair_t     = 0; /* when the contact count last rose to two */
+    static uint16_t pp_x[2], pp_y[2]; /* last seen pair positions */
+    static bool     pp_valid = false;
+    static bool     scr_lift = false; /* 2->1 classified as a deliberate lift: scroll-following ends, momentum plays */
     static int      prev_n     = 0; /* contact count on the previous report */
     static int      sc_cx = 0, sc_cy = 0; /* previous scroll centroid */
     static int      sc_n = 0;             /* finger count it was valid for */
@@ -403,10 +425,15 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
 
     int cx_sum = 0;
     int cy_sum = 0;
+    uint16_t x2 = 0, y2 = 0;
     for (int i = 0; i < DIGITIZER_FINGER_COUNT; i++) {
         if (report->fingers[i].tip) {
             cx_sum += report->fingers[i].x;
             cy_sum += report->fingers[i].y;
+            if (contacts == 1) {
+                x2 = report->fingers[i].x;
+                y2 = report->fingers[i].y;
+            }
             if (contacts == 0) {
                 x = report->fingers[i].x;
                 y = report->fingers[i].y;
@@ -443,6 +470,14 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         }
     }
 
+    if (digitizer_gesture_trace) {
+        static int t_n = -1;
+        if (contacts != t_n) {
+            uprintf("CNT t=%lu n=%d\n", timer_read32(), contacts);
+            t_n = contacts;
+        }
+    }
+
     /* A third contact only counts as a swipe when SUSTAINED: heavy slow
      * fingers momentarily split into phantom contacts (single-report
      * blips) that must never fire Spaces switches mid-scroll. */
@@ -453,8 +488,54 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     }
     if (contacts >= 2) two_seen_t = timer_read32() | 1;
     if (contacts >= 2 && prev_n < 2) pair_t = timer_read32() | 1;
+    /* LIFT vs MERGE at a 2->1 transition: after a lift the surviving
+     * contact sits at one FINGER's position; after a merge the blob
+     * sits near the midpoint. Only decidable when the pair was spread
+     * enough to tell - close pairs stay merges (which they nearly
+     * always are). A lift ends scroll-following; momentum still plays. */
+    if (contacts == 1 && prev_n >= 2 && pp_valid) {
+        const int gx   = (int)pp_x[0] - (int)pp_x[1];
+        const int gy   = (int)pp_y[0] - (int)pp_y[1];
+        const int gap2 = gx * gx + gy * gy;
+        if (gap2 > 240 * 240) {
+            const int mx  = ((int)pp_x[0] + (int)pp_x[1]) / 2;
+            const int my  = ((int)pp_y[0] + (int)pp_y[1]) / 2;
+            const int dm2 = ((int)x - mx) * ((int)x - mx) + ((int)y - my) * ((int)y - my);
+            int       df2 = ((int)x - (int)pp_x[0]) * ((int)x - (int)pp_x[0]) + ((int)y - (int)pp_y[0]) * ((int)y - (int)pp_y[0]);
+            const int d1  = ((int)x - (int)pp_x[1]) * ((int)x - (int)pp_x[1]) + ((int)y - (int)pp_y[1]) * ((int)y - (int)pp_y[1]);
+            if (d1 < df2) df2 = d1;
+            if (df2 + 60 * 60 < dm2) scr_lift = true;
+        }
+    }
+    if (contacts >= 2) scr_lift = false;
+    if (contacts == 2) {
+        pp_x[0]  = x;
+        pp_y[0]  = y;
+        pp_x[1]  = x2;
+        pp_y[1]  = y2;
+        pp_valid = true;
+    } else if (contacts == 0) {
+        pp_valid = false;
+    }
     prev_n = contacts;
     const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
+    /* Three-finger drag: while engaged, the trio is presented to the
+     * rest of the pipeline as ONE contact at the centroid with the
+     * button held - the full pointer pipeline (filter, anchor, median)
+     * applies unchanged. Ends when any finger lifts. */
+    static bool drag3 = false;
+    if (digitizer_three_finger_drag) {
+        if (!drag3 && tri_sustained && (state == Down || state == MoveScroll)) drag3 = true;
+        if (drag3 && contacts < 3) drag3 = false;
+        if (drag3) {
+            x        = cx_sum / contacts;
+            y        = cy_sum / contacts;
+            contacts = 1;
+        }
+    } else {
+        drag3 = false;
+    }
+    const bool drag3_live = drag3;
 
     switch (state) {
         case None: {
@@ -470,6 +551,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 scroll_coasting    = false;
                 scroll_clicked     = false;
                 scr_esc            = false;
+                scr_lift           = false;
                 state              = Down;
                 contact_start_time = timer_read32();
                 contact_start_x    = x;
@@ -492,7 +574,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             if (contacts == 0) {
                 state              = Tapped;
                 contact_start_time = timer_read32();
-                uprintf("TAPJ down tc=%d dur=%lu -> tap\n", tap_contacts, duration);
+                if (digitizer_gesture_trace) uprintf("TAPJ down tc=%d dur=%lu -> tap\n", tap_contacts, duration);
             } else if (contacts > 3 || (contacts == 3 && tri_sustained)) {
                 state = Swipe;
             } else if (contacts == 2) {
@@ -537,8 +619,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     state              = Tapped;
                     contact_start_time = timer_read32();
                 }
-                uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
-            } else if (contacts == 1 && !scr_esc && !(tap_contacts >= 2 && duration < 500 && two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS) && !(timer_elapsed32(scroll_click_t) < DIGITIZER_MOUSE_RESCROLL_MS && abs((int)x - sc_cx) < DIGITIZER_MOUSE_RESCROLL_UNITS && abs((int)y - sc_cy) < DIGITIZER_MOUSE_RESCROLL_UNITS)) {
+                if (digitizer_gesture_trace) uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
+            } else if (contacts == 1 && (scr_lift || (!scr_esc && !(tap_contacts >= 2 && duration < 500 && two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS) && !(touch_click_t != 0 && timer_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS && abs((int)x - sc_cx) < DIGITIZER_MOUSE_RESCROLL_UNITS && abs((int)y - sc_cy) < DIGITIZER_MOUSE_RESCROLL_UNITS)))) {
                 /* scr_esc alone is decisive: an ENGAGED scroll stays a
                  * scroll until every finger lifts, like Apple - a touch
                  * never mutates into pointer motion mid-gesture, however
@@ -725,7 +807,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     /* HID delta = motion of the FILTERED position. Emit the
                      * integer part, retain the sub-unit remainder so slow
                      * drags accumulate instead of truncating to nothing. */
-                    const float pscale = DIGITIZER_MOUSE_POINTER_SCALE_PCT / 100.0f;
+                    const float pscale = digitizer_pointer_scale_pct / 100.0f;
                     const int odx = (int)((oe_x - oe_out_x) * pscale);
                     const int ody = (int)((oe_y - oe_out_y) * pscale);
                     oe_out_x += (float)odx / pscale;
@@ -829,6 +911,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         if (gap < digitizer_scroll_interval_ms) gap = digitizer_scroll_interval_ms;
                         if (gap > 1000) gap = 1000;
                         scroll_click_t = nowc;
+                        touch_click_t  = nowc;
                         coast_v16h     = (sh * 16000) / (int)gap;
                         coast_v16v     = (sv * 16000) / (int)gap;
                         /* the coast emits single clicks on a rhythm - cap
@@ -837,7 +920,10 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         if (coast_v16h < -992) coast_v16h = -992;
                         if (coast_v16v > 992) coast_v16v = 992;
                         if (coast_v16v < -992) coast_v16v = -992;
-                        mouse_report.h = digitizer_natural_scroll ? -sh : sh;
+                        /* natural flips VERTICAL only: the horizontal
+                         * wheel convention is already content-follows-
+                         * finger, negating it reads backwards */
+                        mouse_report.h = sh;
                         mouse_report.v = digitizer_natural_scroll ? -sv : sv;
 #ifdef MAXTOUCH_EVENT_TRACE
                         uprintf("SCRL div=%u sh=%d sv=%d\n", digitizer_scroll_divisor, sh, sv);
@@ -916,11 +1002,19 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
      * 0.998/ms, fixed-point per elapsed gap) bleeds the velocity, until
      * the rhythm falls under ~3 clicks/s. The tail literally ends line
      * by line. A new touch cancels it (see state None). */
+    if (digitizer_gesture_trace) {
+        static State t_st = None;
+        if (state != t_st) {
+            uprintf("ST t=%lu %d->%d n=%d tc=%d esc=%d clk=%d\n", timer_read32(), t_st, state, contacts, tap_contacts, (int)scr_esc, (int)scroll_clicked);
+            t_st = state;
+        }
+    }
+
     /* Momentum also carries UNDER a lone leftover finger: lifting one
      * finger of a scrolling pair must not kill the fling (Apple keeps
      * it). The shared rhythm clock arbitrates - a moving finger's own
      * clicks defer the coast automatically. */
-    if ((state == None && contacts == 0) || (scroll_branch_live && contacts == 1)) {
+    if ((state == None && contacts == 0) || (scroll_branch_live && contacts == 1) || (scr_lift && contacts == 1 && state == MoveScroll)) {
         const int vmag = MAX(abs(coast_v16h), abs(coast_v16v));
         if (vmag >= 48) {
             scroll_coasting = true;
@@ -935,7 +1029,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 const int sv = coast_v16v > 0 ? 1 : (coast_v16v < 0 ? -1 : 0);
                 coast_v16h   = (coast_v16h * k) / 256;
                 coast_v16v   = (coast_v16v * k) / 256;
-                mouse_report.h = digitizer_natural_scroll ? -sh : sh;
+                mouse_report.h = sh;
                 mouse_report.v = digitizer_natural_scroll ? -sv : sv;
 #ifdef MAXTOUCH_EVENT_TRACE
                 if (sh || sv) uprintf("COAST sh=%d sv=%d\n", sh, sv);
@@ -962,7 +1056,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         }
     }
     const bool button_pressed = tap || (state == Drag);
-    if (report->button1 || (tap_contacts == 1 && button_pressed)) {
+    if (report->button1 || (tap_contacts == 1 && button_pressed) || drag3_live) {
         mouse_report.buttons |= 0x1;
         if (digitizer_taps_as_clicks) report->button1 = 1;
     }

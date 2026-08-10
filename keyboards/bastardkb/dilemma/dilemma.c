@@ -93,7 +93,8 @@ static void read_dilemma_config_from_eeprom(dilemma_config_t *config) {
  * these across reboots of the board.
  */
 static void write_dilemma_config_to_eeprom(dilemma_config_t *config) {
-    eeconfig_update_kb(config->raw);
+    /* byte 0 only - bytes 1-2 hold the VIA trackpad settings */
+    eeconfig_update_kb((eeconfig_read_kb() & 0xffffff00) | (config->raw & 0xff));
 }
 
 /** \brief Return the current value of the pointer's default DPI. */
@@ -318,6 +319,23 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
             if (record->event.pressed) {
                 extern bool digitizer_natural_scroll;
                 digitizer_natural_scroll = !digitizer_natural_scroll;
+            }
+            break;
+        case THREE_FINGER_DRAG_TOGGLE:
+            if (record->event.pressed) {
+                extern bool digitizer_three_finger_drag;
+                digitizer_three_finger_drag = !digitizer_three_finger_drag;
+            }
+            break;
+        case THREE_FINGER_DRAG_MOMENTARY: {
+            extern bool digitizer_three_finger_drag;
+            digitizer_three_finger_drag = record->event.pressed;
+            break;
+        }
+        case TRACE_MARK:
+            if (record->event.pressed) {
+                static uint32_t mark_n = 0;
+                uprintf("\n==== MARK %lu t=%lu ====\n\n", ++mark_n, timer_read32());
             }
             break;
 #        endif // POINTING_DEVICE_DRIVER_digitizer
