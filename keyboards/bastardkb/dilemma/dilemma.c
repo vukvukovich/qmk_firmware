@@ -321,15 +321,15 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                 digitizer_natural_scroll = !digitizer_natural_scroll;
             }
             break;
-        case THREE_FINGER_DRAG_TOGGLE:
+        case SELECT_DRAG_TOGGLE:
             if (record->event.pressed) {
-                extern bool digitizer_three_finger_drag;
-                digitizer_three_finger_drag = !digitizer_three_finger_drag;
+                extern bool digitizer_select_drag;
+                digitizer_select_drag = !digitizer_select_drag;
             }
             break;
-        case THREE_FINGER_DRAG_MOMENTARY: {
-            extern bool digitizer_three_finger_drag;
-            digitizer_three_finger_drag = record->event.pressed;
+        case SELECT_DRAG_MOMENTARY: {
+            extern bool digitizer_select_drag;
+            digitizer_select_drag = record->event.pressed;
             break;
         }
         case TRACE_MARK:

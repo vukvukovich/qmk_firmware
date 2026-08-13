@@ -23,7 +23,7 @@
  * formed (not the first finger), so a staggered second finger still
  * right-clicks. Wider than the one-finger window, like Apple. */
 #    ifndef DIGITIZER_MOUSE_TAP_SALVAGE_MS
-#        define DIGITIZER_MOUSE_TAP_SALVAGE_MS 250
+#        define DIGITIZER_MOUSE_TAP_SALVAGE_MS 400 /* journaled: relaxed right-click taps hold the pair 260-380ms; travel gate guards scroll intent */
 #    endif
 
 #    ifndef DIGITIZER_MOUSE_TAP_DURATION
@@ -71,6 +71,20 @@
  * unaffected - only speed. Scroll has its own divisor. */
 #    ifndef DIGITIZER_MOUSE_POINTER_SCALE_PCT
 #        define DIGITIZER_MOUSE_POINTER_SCALE_PCT 100
+#    endif
+
+/* Pinch zoom: two contacts whose GAP changes while the centroid stays
+ * put are zooming, not scrolling. macOS accepts no synthetic pinch
+ * events from third-party devices, so zoom is emitted as discrete
+ * keycode steps (Cmd+= / Cmd+-, the shortcut every app answers). */
+#    ifndef DIGITIZER_PINCH_STEP_UNITS
+#        define DIGITIZER_PINCH_STEP_UNITS 220
+#    endif
+#    ifndef DIGITIZER_PINCH_IN_KC
+#        define DIGITIZER_PINCH_IN_KC G(KC_EQL) /* spread = zoom in */
+#    endif
+#    ifndef DIGITIZER_PINCH_OUT_KC
+#        define DIGITIZER_PINCH_OUT_KC G(KC_MINS)
 #    endif
 
 /* Rapid scroll-spinning: fingers lift and re-land in rhythm, and a
@@ -178,18 +192,18 @@ bool  one_euro_rest_clamp = true;
 // Three-finger drag (Apple's accessibility gesture): three sustained
 // fingers hold the left button and move the pointer via the centroid.
 // Runtime-toggleable; swipes are gated off while active.
-#    ifdef DIGITIZER_THREE_FINGER_DRAG
-bool digitizer_three_finger_drag = true;
+#    ifdef DIGITIZER_SELECT_DRAG
+bool digitizer_select_drag = true;
 #    else
-bool digitizer_three_finger_drag = false;
+bool digitizer_select_drag = false;
 #    endif
 
 // Gesture journal, runtime-toggleable (VIA checkbox): contact-count
 // changes, state transitions, tap judgments - a few lines per gesture.
-#    ifdef DIGITIZER_MOUSE_GESTURE_TRACE
-bool digitizer_gesture_trace = true;
-#    else
+#    ifdef DIGITIZER_MOUSE_GESTURE_TRACE_OFF
 bool digitizer_gesture_trace = false;
+#    else
+bool digitizer_gesture_trace = true; /* free unless a console attaches; VIA toggle overrides */
 #    endif
 
 // Natural (content-follows-finger) scroll direction, as on Apple
@@ -207,6 +221,10 @@ bool digitizer_natural_scroll = false;
 uint8_t  digitizer_scroll_divisor     = DIGITIZER_SCROLL_DIVISOR;
 uint8_t  digitizer_pointer_scale_pct  = DIGITIZER_MOUSE_POINTER_SCALE_PCT;
 uint16_t digitizer_scroll_interval_ms = DIGITIZER_SCROLL_INTERVAL_MS;
+
+// Pinch zoom actions, runtime-assignable (VIA keycode pickers).
+uint16_t digitizer_pinch_in_kc  = DIGITIZER_PINCH_IN_KC;
+uint16_t digitizer_pinch_out_kc = DIGITIZER_PINCH_OUT_KC;
 
 // Swipe dispatch, keymap-overridable (see digitizer_mouse_fallback.h).
 __attribute__((weak)) void digitizer_swipe_action(digitizer_swipe_dir_t dir) {
@@ -281,6 +299,15 @@ static bool digitizer_mouse_fallback_init(void)
  */
 static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report) {
     if (force_digitizer_send_mouse_reports || digitizer_send_mouse_reports) {
+        /* drag-lock release: the mode key can be released with no
+         * finger on the pad, so no sensor frame will ever clear the
+         * held button - drop it here, on the report path that always
+         * runs. */
+        static bool prev_drag_mode = false;
+        if (prev_drag_mode && !digitizer_select_drag) {
+            mouse_report.buttons &= (uint8_t)~0x1;
+        }
+        prev_drag_mode = digitizer_select_drag;
         report_mouse_t report = mouse_report;
         // Retain the button state, but drop any motion.
         memset(&mouse_report, 0, sizeof(report_mouse_t));
@@ -383,6 +410,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static uint16_t pp_x[2], pp_y[2]; /* last seen pair positions */
     static bool     pp_valid = false;
     static bool     scr_lift = false; /* 2->1 classified as a deliberate lift: scroll-following ends, momentum plays */
+    static int      pinch_gap  = 0; /* pair gap on the previous report */
+    static int      pinch_acc  = 0; /* accumulated gap change */
+    static bool     pinch_lock = false; /* gesture committed to zooming */
     static int      prev_n     = 0; /* contact count on the previous report */
     static int      sc_cx = 0, sc_cy = 0; /* previous scroll centroid */
     static int      sc_n = 0;             /* finger count it was valid for */
@@ -487,7 +517,19 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         tri_t = 0;
     }
     if (contacts >= 2) two_seen_t = timer_read32() | 1;
-    if (contacts >= 2 && prev_n < 2) pair_t = timer_read32() | 1;
+    static int pair_cx = 0, pair_cy = 0; /* centroid when the pair formed */
+    static int pair_dev2 = 0;             /* its peak squared travel since */
+    if (contacts >= 2 && prev_n < 2) {
+        pair_t    = timer_read32() | 1;
+        pair_cx   = cx_sum / contacts;
+        pair_cy   = cy_sum / contacts;
+        pair_dev2 = 0;
+    } else if (contacts >= 2) {
+        const int pdx = cx_sum / contacts - pair_cx;
+        const int pdy = cy_sum / contacts - pair_cy;
+        const int d2  = pdx * pdx + pdy * pdy;
+        if (d2 > pair_dev2) pair_dev2 = d2;
+    }
     /* LIFT vs MERGE at a 2->1 transition: after a lift the surviving
      * contact sits at one FINGER's position; after a merge the blob
      * sits near the midpoint. Only decidable when the pair was spread
@@ -519,23 +561,32 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     }
     prev_n = contacts;
     const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
-    /* Three-finger drag: while engaged, the trio is presented to the
-     * rest of the pipeline as ONE contact at the centroid with the
-     * button held - the full pointer pipeline (filter, anchor, median)
-     * applies unchanged. Ends when any finger lifts. */
-    static bool drag3 = false;
-    if (digitizer_three_finger_drag) {
-        if (!drag3 && tri_sustained && (state == Down || state == MoveScroll)) drag3 = true;
-        if (drag3 && contacts < 3) drag3 = false;
-        if (drag3) {
+    /* A real three-finger swipe has its third finger down near the
+     * GESTURE start; a phantom third contact materializes mid-scroll
+     * (measured: noise-conjured swipes firing Spaces during long
+     * two-finger scrolls). Judge swipe intent by arrival time. */
+    const bool tri_from_start = tri_t != 0 && (uint32_t)(tri_t - (uint32_t)contact_start_time) < 200;
+    /* Select & drag mode: while active (hold-key or toggle), ANY
+     * contact drags - the held key already declares intent, so no
+     * finger counting (three close fingers merge constantly on this
+     * pad and made count-gated drag stutter). Contacts are presented
+     * to the pipeline as ONE at the centroid with the button held;
+     * the full pointer pipeline applies. Key+tap = left click. */
+    static bool seldrag = false;
+    if (digitizer_select_drag) {
+        /* DRAG LOCK: once a finger engages, the button stays held
+         * through lifts as long as the mode key is held - reposition
+         * mid-selection freely; only releasing the key drops it. */
+        if (contacts >= 1) seldrag = true;
+        if (seldrag && contacts >= 1) {
             x        = cx_sum / contacts;
             y        = cy_sum / contacts;
             contacts = 1;
         }
     } else {
-        drag3 = false;
+        seldrag = false;
     }
-    const bool drag3_live = drag3;
+    const bool seldrag_live = seldrag;
 
     switch (state) {
         case None: {
@@ -552,6 +603,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 scroll_clicked     = false;
                 scr_esc            = false;
                 scr_lift           = false;
+                pinch_acc          = 0;
+                pinch_lock         = false;
                 state              = Down;
                 contact_start_time = timer_read32();
                 contact_start_x    = x;
@@ -575,7 +628,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 state              = Tapped;
                 contact_start_time = timer_read32();
                 if (digitizer_gesture_trace) uprintf("TAPJ down tc=%d dur=%lu -> tap\n", tap_contacts, duration);
-            } else if (contacts > 3 || (contacts == 3 && tri_sustained)) {
+            } else if (contacts > 3 || (contacts == 3 && tri_sustained && tri_from_start)) {
                 state = Swipe;
             } else if (contacts == 2) {
                 /* Two fingers: scroll must respond the moment they move -
@@ -615,12 +668,15 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                  * promoted to MoveScroll, which used to silently eat the
                  * tap. Judge at lift, like Apple: brief touch, nothing
                  * scrolled - it was a right-click tap all along. */
-                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS) {
+                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS && pair_dev2 < (2 * DIGITIZER_MOUSE_TAP_DISTANCE) * (2 * DIGITIZER_MOUSE_TAP_DISTANCE)) {
                     state              = Tapped;
                     contact_start_time = timer_read32();
                 }
                 if (digitizer_gesture_trace) uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
             } else if (contacts == 1 && (scr_lift || (!scr_esc && !(tap_contacts >= 2 && duration < 500 && two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS) && !(touch_click_t != 0 && timer_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS && abs((int)x - sc_cx) < DIGITIZER_MOUSE_RESCROLL_UNITS && abs((int)y - sc_cy) < DIGITIZER_MOUSE_RESCROLL_UNITS)))) {
+                if (digitizer_gesture_trace && touch_click_t != 0 && timer_elapsed32(touch_click_t) < 1500) {
+                    uprintf("RSC miss dt=%lu dx=%d dy=%d esc=%d tc=%d\n", timer_elapsed32(touch_click_t), (int)x - sc_cx, (int)y - sc_cy, (int)scr_esc, tap_contacts);
+                }
                 /* scr_esc alone is decisive: an ENGAGED scroll stays a
                  * scroll until every finger lifts, like Apple - a touch
                  * never mutates into pointer motion mid-gesture, however
@@ -819,7 +875,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
 #endif
                 }
 #endif
-            } else if (contacts == 3 && tri_sustained && duration < DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
+            } else if (contacts == 3 && tri_sustained && tri_from_start && duration < DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
                 state = Swipe;
             } else {
                 scroll_branch_live = true;
@@ -832,6 +888,28 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                  * finger count changes (the centroid legitimately jumps). */
                 const int cx = cx_sum / contacts;
                 const int cy = cy_sum / contacts;
+                /* pinch detection: gap change accumulates; a gesture that
+                 * has not scrolled and spreads/converges a full step is a
+                 * zoom, and stays one until the fingers lift */
+                if (contacts == 2) {
+                    const int gap = MAX(abs((int)x - (int)x2), abs((int)y - (int)y2));
+                    if (sc_n == 2) {
+                        pinch_acc += gap - pinch_gap;
+                        if (!scroll_clicked || pinch_lock) {
+                            while (pinch_acc > DIGITIZER_PINCH_STEP_UNITS) {
+                                tap_code16(digitizer_pinch_in_kc);
+                                pinch_acc -= DIGITIZER_PINCH_STEP_UNITS;
+                                pinch_lock = true;
+                            }
+                            while (pinch_acc < -DIGITIZER_PINCH_STEP_UNITS) {
+                                tap_code16(digitizer_pinch_out_kc);
+                                pinch_acc += DIGITIZER_PINCH_STEP_UNITS;
+                                pinch_lock = true;
+                            }
+                        }
+                    }
+                    pinch_gap = gap;
+                }
                 if (sc_n != contacts) {
                     sc_n        = contacts;
                     sc_cx       = cx;
@@ -867,7 +945,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         coast_v16v   = 0;
                     }
                 }
-                if (!scr_anch) {
+                if (!scr_anch && !pinch_lock) {
                     scroll_acc_h += (cx - sc_cx) * DIGITIZER_SCROLL_SCALE;
                     scroll_acc_v += (cy - sc_cy) * DIGITIZER_SCROLL_SCALE;
                     /* a MERGED blob that keeps travelling keeps the scroll
@@ -920,6 +998,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         if (coast_v16h < -992) coast_v16h = -992;
                         if (coast_v16v > 992) coast_v16v = 992;
                         if (coast_v16v < -992) coast_v16v = -992;
+                        /* momentum inherits ONE axis: mixed-axis launch
+                         * velocities made the page drift sideways or
+                         * diagonally after a vertical flick (journaled) */
+                        if (abs(coast_v16v) >= abs(coast_v16h)) coast_v16h = 0;
+                        else coast_v16v = 0;
                         /* natural flips VERTICAL only: the horizontal
                          * wheel convention is already content-follows-
                          * finger, negating it reads backwards */
@@ -1056,7 +1139,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         }
     }
     const bool button_pressed = tap || (state == Drag);
-    if (report->button1 || (tap_contacts == 1 && button_pressed) || drag3_live) {
+    if (report->button1 || (tap_contacts == 1 && button_pressed) || seldrag_live) {
         mouse_report.buttons |= 0x1;
         if (digitizer_taps_as_clicks) report->button1 = 1;
     }
