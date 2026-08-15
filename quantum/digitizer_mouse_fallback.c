@@ -222,6 +222,17 @@ uint8_t  digitizer_scroll_divisor     = DIGITIZER_SCROLL_DIVISOR;
 uint8_t  digitizer_pointer_scale_pct  = DIGITIZER_MOUSE_POINTER_SCALE_PCT;
 uint16_t digitizer_scroll_interval_ms = DIGITIZER_SCROLL_INTERVAL_MS;
 
+/* The coast emits ONE click per rhythm tick and the rhythm tops out near
+ * 60 ticks/s, so a fling is worth about 60 clicks/s however hard it was
+ * thrown. That is a fine fling while a click is a whole line, but once
+ * the descriptor declares a real scroll resolution a click is only a
+ * pixel or two and the same 60 clicks/s becomes a barely visible drift.
+ * Emit a proportional batch per tick instead, so the fling keeps its
+ * pixel speed when the click gets finer. Default 1 = unchanged. */
+#    ifndef DIGITIZER_SCROLL_COAST_CLICKS
+#        define DIGITIZER_SCROLL_COAST_CLICKS 1
+#    endif
+
 // Pinch zoom actions, runtime-assignable (VIA keycode pickers).
 uint16_t digitizer_pinch_in_kc  = DIGITIZER_PINCH_IN_KC;
 uint16_t digitizer_pinch_out_kc = DIGITIZER_PINCH_OUT_KC;
@@ -1108,8 +1119,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 scroll_click_t = nowc;
                 int k = 256 - ((int)g * 512) / 1000;
                 if (k < 64) k = 64;
-                const int sh = coast_v16h > 0 ? 1 : (coast_v16h < 0 ? -1 : 0);
-                const int sv = coast_v16v > 0 ? 1 : (coast_v16v < 0 ? -1 : 0);
+                const int sh = (coast_v16h > 0 ? 1 : (coast_v16h < 0 ? -1 : 0)) * DIGITIZER_SCROLL_COAST_CLICKS;
+                const int sv = (coast_v16v > 0 ? 1 : (coast_v16v < 0 ? -1 : 0)) * DIGITIZER_SCROLL_COAST_CLICKS;
                 coast_v16h   = (coast_v16h * k) / 256;
                 coast_v16v   = (coast_v16v * k) / 256;
                 mouse_report.h = sh;

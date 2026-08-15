@@ -117,6 +117,22 @@ const USB_Descriptor_HIDReport_Datatype_t PROGMEM KeyboardReport[] = {
 };
 #endif
 
+#ifdef WHEEL_RESOLUTION_CPI
+/* See the wheel section of the mouse report descriptor below. The physical
+ * maximum is what actually encodes the resolution; it is derived here so a
+ * keymap only has to state the counts-per-inch it wants. */
+#    ifdef WHEEL_EXTENDED_REPORT
+/* A 16-bit wheel spans 65534 counts, so the physical maximum would overflow
+ * the signed 16-bit item for any usable resolution. Not supported. */
+#        error "WHEEL_RESOLUTION_CPI cannot be combined with WHEEL_EXTENDED_REPORT"
+#    endif
+#    define WHEEL_LOGICAL_SPAN 254 /* -127..127 */
+#    define WHEEL_PHYSICAL_MAX ((WHEEL_LOGICAL_SPAN * 1000) / (WHEEL_RESOLUTION_CPI))
+#    if WHEEL_PHYSICAL_MAX > 32767 || WHEEL_PHYSICAL_MAX < 1
+#        error "WHEEL_RESOLUTION_CPI out of range - physical maximum does not fit a 16-bit item"
+#    endif
+#endif
+
 #ifdef MOUSE_ENABLE
 #    ifndef MOUSE_SHARED_EP
 const USB_Descriptor_HIDReport_Datatype_t PROGMEM MouseReport[] = {
@@ -196,7 +212,36 @@ const USB_Descriptor_HIDReport_Datatype_t PROGMEM SharedReport[] = {
             HID_RI_REPORT_COUNT(8, 0x01),
             HID_RI_REPORT_SIZE(8, 0x10),
 #    endif
+#    ifdef WHEEL_RESOLUTION_CPI
+            /* Declare a scroll resolution so the host stops assuming a
+             * coarse detented wheel.
+             *
+             * macOS derives it straight from these items
+             * (IOHIDEventService::determineResolution): when physical and
+             * logical extents differ it computes
+             *     resolution = (logicalDiff * 10^-exponent) / physicalDiff
+             * and otherwise falls back to kDefaultScrollFixedResolution,
+             * which is 9 counts/inch - the chunky wheel quantum. Apple's
+             * own trackpad reports 400.
+             *
+             * With exponent -3 the numerator is fixed at
+             * WHEEL_LOGICAL_SPAN * 1000, so the physical maximum below is
+             * just that divided by the resolution we want. Both divisions
+             * are integer, so pick a CPI that divides cleanly (400, 200,
+             * 100, 50, 40, 32, 25 all do). */
+            HID_RI_UNIT_EXPONENT(8, 0x0D), /* -3 */
+            HID_RI_PHYSICAL_MINIMUM(8, 0),
+            HID_RI_PHYSICAL_MAXIMUM(16, WHEEL_PHYSICAL_MAX),
+#    endif
             HID_RI_INPUT(8, HID_IOF_DATA | HID_IOF_VARIABLE | HID_IOF_RELATIVE),
+#    ifdef WHEEL_RESOLUTION_CPI
+            /* Globals persist to every later item, so put them back the way
+             * QMK does after the Resolution Multiplier block above - the
+             * horizontal axis below must not inherit this physical range. */
+            HID_RI_UNIT_EXPONENT(8, 0x00),
+            HID_RI_PHYSICAL_MINIMUM(8, 0),
+            HID_RI_PHYSICAL_MAXIMUM(8, 0),
+#    endif
 
             // Horizontal wheel (1 or 2 bytes)
             HID_RI_USAGE_PAGE(8, 0x0C),// Consumer
