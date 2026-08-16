@@ -364,10 +364,17 @@ void maxtouch_init(void) {
     }
 
 #ifdef MXT_NOISE_SUPPRESSION
-    /* T72 dynamic noise suppression (charger noise). Full register map
-     * is NDA; CTRL bit0 = ENABLE is the maXTouch-wide convention, all
-     * other fields stay at chip defaults. Volatile - rewritten every
-     * boot, removed by dropping the define. */
+    /* T72 dynamic noise suppression (charger noise). NOT ENABLED, and
+     * enabling it blind was MEASURED AS A REGRESSION - do not switch
+     * this on expecting a fix. The full register map is NDA, so only
+     * CTRL bit0 = ENABLE can be set and every other field stays at a
+     * chip default; a noise-suppression block running on unconfigured
+     * parameters made phantom events worse, not better.
+     *
+     * Kept as the landing spot for a real T72 configuration if the
+     * protocol guide ever becomes available, since that is the one
+     * remaining defence against conducted charger noise. Volatile -
+     * rewritten every boot, removed by dropping the define. */
     if (t72_noisesuppression_address) {
         uint8_t t72_ctrl = 1;
         i2c_write_register16(MXT336UD_ADDRESS, t72_noisesuppression_address, &t72_ctrl, 1, MXT_I2C_TIMEOUT_MS);

@@ -1154,10 +1154,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                      * the page goes: the remainder simply waits here.
                      * The floor keeps a slow drag from stalling once the
                      * reservoir holds less than one tick's share. */
-                    int sh = (scroll_acc_h / (int)digitizer_scroll_divisor) / DIGITIZER_SCROLL_SMOOTH_TICKS;
-                    int sv = (scroll_acc_v / (int)digitizer_scroll_divisor) / DIGITIZER_SCROLL_SMOOTH_TICKS;
-                    if (!sh && abs(scroll_acc_h) >= (int)digitizer_scroll_divisor) sh = scroll_acc_h > 0 ? 1 : -1;
-                    if (!sv && abs(scroll_acc_v) >= (int)digitizer_scroll_divisor) sv = scroll_acc_v > 0 ? 1 : -1;
+                    const int sdiv = digitizer_scroll_divisor ? (int)digitizer_scroll_divisor : 1;
+                    int sh = (scroll_acc_h / sdiv) / DIGITIZER_SCROLL_SMOOTH_TICKS;
+                    int sv = (scroll_acc_v / sdiv) / DIGITIZER_SCROLL_SMOOTH_TICKS;
+                    if (!sh && abs(scroll_acc_h) >= sdiv) sh = scroll_acc_h > 0 ? 1 : -1;
+                    if (!sv && abs(scroll_acc_v) >= sdiv) sv = scroll_acc_v > 0 ? 1 : -1;
                     if (sh > 100) sh = 100;
                     if (sh < -100) sh = -100;
                     if (sv > 100) sv = 100;
@@ -1171,10 +1172,14 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                      * the page visibly springs back as the gesture ends.
                      * MEASURED: every reversal in a session sat 1-3 clicks
                      * and immediately preceded a contact-count change.
-                     * Withhold a small against-the-grain click rather than
-                     * dropping it: the travel stays in the accumulator, so
-                     * a genuine change of direction clears the threshold
-                     * within a few clicks and still gets through. */
+                     * The travel is CONSUMED, not held back. Holding it
+                     * back was the first attempt and it was worse: the
+                     * backlash piled up in the accumulator until it
+                     * cleared the threshold and then fired as one lump,
+                     * measured as a clean deceleration followed by a
+                     * single -6 that also seeded the coast backwards. A
+                     * real change of direction persists across ticks,
+                     * which liftoff twitch does not, so count ticks. */
                     if (scr_dir_v && sv && ((sv > 0) != (scr_dir_v > 0))) {
                         if (++scr_rev_v < DIGITIZER_SCROLL_REVERSE_TICKS) {
                             scroll_acc_v -= sv * (int)digitizer_scroll_divisor; /* CONSUME, never queue */
@@ -1202,6 +1207,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         const uint32_t nowc = timer_read32();
                         uint32_t       gap  = nowc - scroll_click_t;
                         if (gap < digitizer_scroll_interval_ms) gap = digitizer_scroll_interval_ms;
+                        if (gap < 1) gap = 1; /* both bounds are runtime-tunable; never divide by zero */
                         if (gap > 1000) gap = 1000;
                         scroll_click_t = nowc;
                         touch_click_t  = nowc;
@@ -1224,8 +1230,8 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                          * direction. */
                         if (scr_dir_v && coast_v16v && ((coast_v16v > 0) != (scr_dir_v > 0))) coast_v16v = 0;
                         if (scr_dir_h && coast_v16h && ((coast_v16h > 0) != (scr_dir_h > 0))) coast_v16h = 0;
-                        /* the coast emits single clicks on a rhythm - cap
-                         * its launch speed at ~60 clicks/s */
+                        /* ceiling on launch velocity, well clear of
+                         * ordinary use so the fling stays proportional */
                         if (coast_v16h > DIGITIZER_COAST_MAX_V16) coast_v16h = DIGITIZER_COAST_MAX_V16;
                         if (coast_v16h < -DIGITIZER_COAST_MAX_V16) coast_v16h = -DIGITIZER_COAST_MAX_V16;
                         if (coast_v16v > DIGITIZER_COAST_MAX_V16) coast_v16v = DIGITIZER_COAST_MAX_V16;
@@ -1312,11 +1318,12 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             break;
         }
     }
-    /* Kinetic scroll (fling): after liftoff the captured click rhythm
-     * continues - single clicks whose gaps stretch as friction (Apple's
-     * 0.998/ms, fixed-point per elapsed gap) bleeds the velocity, until
-     * the rhythm falls under ~3 clicks/s. The tail literally ends line
-     * by line. A new touch cancels it (see state None). */
+    /* Kinetic scroll (fling): after liftoff the gesture's launch velocity
+     * is played out on a fixed tick, distance = velocity x time, with
+     * friction bleeding the velocity every millisecond until it falls
+     * under the stop threshold. Total distance is therefore proportional
+     * to how hard the flick was thrown. A new touch cancels it (see
+     * state None). */
     if (digitizer_gesture_trace) {
         static State t_st = None;
         if (state != t_st) {
