@@ -849,7 +849,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     if (oe_init && (abs((int)x - (int)last_x) > DIGITIZER_MOUSE_TELEPORT_UNITS || abs((int)y - (int)last_y) > DIGITIZER_MOUSE_TELEPORT_UNITS)) {
                         oe_init = false;
 #ifdef MAXTOUCH_EVENT_TRACE
-                        uprintf("TELE %d,%d\n", (int)x - (int)last_x, (int)y - (int)last_y);
+                        if (digitizer_gesture_trace) uprintf("TELE %d,%d\n", (int)x - (int)last_x, (int)y - (int)last_y);
 #endif
                     }
                     oe_last_run = now;
@@ -913,7 +913,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                             rc_replay_x    = ex;
                             rc_replay_y    = ey;
 #ifdef MAXTOUCH_EVENT_TRACE
-                            uprintf("BRK %d,%d\n", (int)ex, (int)ey);
+                            if (digitizer_gesture_trace) uprintf("BRK %d,%d\n", (int)ex, (int)ey);
 #endif
                         } else {
                             /* absorb: emit nothing, let the anchor slowly
@@ -948,7 +948,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                             rc_replay_x = 0.0f;
                             rc_replay_y = 0.0f;
 #ifdef MAXTOUCH_EVENT_TRACE
-                            uprintf("ANC %d,%d\n", (int)oe_x, (int)oe_y);
+                            if (digitizer_gesture_trace) uprintf("ANC %d,%d\n", (int)oe_x, (int)oe_y);
 #endif
                         }
                         oe_drain_replay(&rc_replay_x, oe_x - oe_out_x, &oe_out_x);
@@ -966,7 +966,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     mouse_report.x = odx;
                     mouse_report.y = ody;
 #ifdef MAXTOUCH_EVENT_TRACE
-                    if (odx || ody) uprintf("OUT %d %d\n", odx, ody);
+                    if (digitizer_gesture_trace && (odx || ody)) uprintf("OUT %d %d\n", odx, ody);
 #endif
                 }
 #endif
@@ -1241,7 +1241,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         mouse_report.h = sh;
                         mouse_report.v = digitizer_natural_scroll ? -sv : sv;
 #ifdef MAXTOUCH_EVENT_TRACE
-                        uprintf("SCRL div=%u sh=%d sv=%d\n", digitizer_scroll_divisor, sh, sv);
+                        if (digitizer_gesture_trace) uprintf("SCRL div=%u sh=%d sv=%d\n", digitizer_scroll_divisor, sh, sv);
 #endif
                     }
                 }
@@ -1278,28 +1278,28 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     digitizer_swipe_action(DIGITIZER_SWIPE_DIR_RIGHT);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
-                    uprintf("SWIPE right\n");
+                    if (digitizer_gesture_trace) uprintf("SWIPE right\n");
 #endif
                 } else if (distance_x < -DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_y) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe left
                     digitizer_swipe_action(DIGITIZER_SWIPE_DIR_LEFT);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
-                    uprintf("SWIPE left\n");
+                    if (digitizer_gesture_trace) uprintf("SWIPE left\n");
 #endif
                 } else if (distance_y > DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_x) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe down
                     digitizer_swipe_action(DIGITIZER_SWIPE_DIR_DOWN);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
-                    uprintf("SWIPE down\n");
+                    if (digitizer_gesture_trace) uprintf("SWIPE down\n");
 #endif
                 } else if (distance_y < -DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_x) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe up
                     digitizer_swipe_action(DIGITIZER_SWIPE_DIR_UP);
                     state = Finished;
 #ifdef MAXTOUCH_EVENT_TRACE
-                    uprintf("SWIPE up\n");
+                    if (digitizer_gesture_trace) uprintf("SWIPE up\n");
 #endif
                 }
             }

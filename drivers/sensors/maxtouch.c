@@ -5,6 +5,10 @@
 #include "i2c_master.h"
 #include "maxtouch.h"
 
+#ifdef MAXTOUCH_EVENT_TRACE
+extern bool digitizer_gesture_trace; /* VIA Trackpad tab: Gesture logging */
+#endif
+
 #include "digitizer.h"
 #include "digitizer_driver.h"
 
@@ -599,11 +603,17 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                     digitizer_report.contacts[contact_id].height = message.data[7];
 #endif
 #ifdef MAXTOUCH_EVENT_TRACE
+                    /* Runtime flag as well as the compile-time one: the
+                     * VIA Trackpad tab has a Gesture logging switch, and
+                     * it has to actually silence the console. This is the
+                     * highest-volume line in the firmware. */
+                    if (digitizer_gesture_trace) {
 #    if defined(DIGITIZER_REPORT_FINGER_SIZE) || defined(MXT_REPORT_CONTACT_SIZE)
-                    uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u w=%u h=%u\n", contact_id, event, type, x, y, ampl, message.data[6], message.data[7]);
+                        uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u w=%u h=%u\n", contact_id, event, type, x, y, ampl, message.data[6], message.data[7]);
 #    else
-                    uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u\n", contact_id, event, type, x, y, ampl);
+                        uprintf("EVT[%u] ev=%d ty=%d x=%u y=%u amp=%u\n", contact_id, event, type, x, y, ampl);
 #    endif
+                    }
 #endif
 
                     switch (type) {
