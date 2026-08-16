@@ -80,6 +80,48 @@
 #    ifndef DIGITIZER_PINCH_STEP_UNITS
 #        define DIGITIZER_PINCH_STEP_UNITS 220
 #    endif
+
+/* A two-finger gesture is classified ONCE, from whichever reading moves
+ * first: gap change (zoom) or centroid travel (scroll). Both are raw
+ * sensor units, so they are directly comparable, and scroll output is
+ * withheld until the verdict is in.
+ *
+ * The thresholds are what the GCLS trace line exists to calibrate - it
+ * prints both readings at every verdict, so a handful of deliberate
+ * scrolls and zooms shows whether the two populations separate cleanly
+ * or overlap. A symmetric pinch moves the gap twice as fast as either
+ * finger and the centroid not at all; the awkward case is a one-finger-
+ * anchored pinch, where the gap moves only twice as fast as the
+ * centroid, so zoom has to be the easier of the two to trip. */
+/* MEASURED (107 verdicts, GCLS trace): comparing each reading against
+ * its own absolute threshold does not discriminate, it merely defines -
+ * scrolls topped out at |pacc| 39 only because the zoom threshold was
+ * 40. The RATIO separates cleanly: scrolls ran 0.25 median and never
+ * passed 1.00, deliberate zooms 2.67 median. Hence a ratio test.
+ *
+ * The same trace showed verdicts landing 2-14ms after the pair formed,
+ * i.e. off a single report, which is where close fingers came unstuck:
+ * they merge and split, the centroid lurches, travel crosses any small
+ * threshold at once and scroll wins before a pinch can show itself. So
+ * hold off until there is enough total movement to be worth judging. */
+/* Clicks an against-the-grain move must reach before it is believed
+ * rather than treated as liftoff backlash. Observed backlash was 1-3
+ * clicks; the accumulator clamp allows 6 to pend, so 4 sits between. */
+#    ifndef DIGITIZER_SCROLL_BACKLASH_CLICKS
+#        define DIGITIZER_SCROLL_BACKLASH_CLICKS 4
+#    endif
+#    ifndef DIGITIZER_TWO_EVIDENCE_UNITS
+#        define DIGITIZER_TWO_EVIDENCE_UNITS 50
+#    endif
+/* Zoom when gap change beats centroid travel by this ratio, expressed
+ * as a fraction to keep it in integers: 3/2 sits above every scroll
+ * measured (max 1.00) and below every clear zoom (min 1.35). */
+#    ifndef DIGITIZER_ZOOM_RATIO_NUM
+#        define DIGITIZER_ZOOM_RATIO_NUM 3
+#    endif
+#    ifndef DIGITIZER_ZOOM_RATIO_DEN
+#        define DIGITIZER_ZOOM_RATIO_DEN 2
+#    endif
 #    ifndef DIGITIZER_PINCH_IN_KC
 #        define DIGITIZER_PINCH_IN_KC G(KC_EQL) /* spread = zoom in */
 #    endif
@@ -421,6 +463,12 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static uint16_t pp_x[2], pp_y[2]; /* last seen pair positions */
     static bool     pp_valid = false;
     static bool     scr_lift = false; /* 2->1 classified as a deliberate lift: scroll-following ends, momentum plays */
+    /* Two-finger verdict, held for the whole gesture. */
+    enum { TWO_UNDECIDED = 0, TWO_SCROLL, TWO_ZOOM };
+    static uint8_t  two_class  = TWO_UNDECIDED;
+    static int      cls_travel = 0; /* centroid travel while still undecided */
+    static int      scr_dir_v  = 0; /* established scroll direction, for the anti-backlash guard */
+    static int      scr_dir_h  = 0;
     static int      pinch_gap  = 0; /* pair gap on the previous report */
     static int      pinch_acc  = 0; /* accumulated gap change */
     static bool     pinch_lock = false; /* gesture committed to zooming */
@@ -616,6 +664,10 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 scr_lift           = false;
                 pinch_acc          = 0;
                 pinch_lock         = false;
+                two_class          = TWO_UNDECIDED;
+                cls_travel         = 0;
+                scr_dir_v          = 0;
+                scr_dir_h          = 0;
                 state              = Down;
                 contact_start_time = timer_read32();
                 contact_start_x    = x;
@@ -903,10 +955,57 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                  * has not scrolled and spreads/converges a full step is a
                  * zoom, and stays one until the fingers lift */
                 if (contacts == 2) {
-                    const int gap = MAX(abs((int)x - (int)x2), abs((int)y - (int)y2));
+                    /* TRUE separation, not MAX(|dx|,|dy|). A pinch is made
+                     * with thumb and index, which sit DIAGONALLY - one
+                     * finger ahead of the other - not side by side. On a
+                     * diagonal, MAX() reads the larger axis only and so
+                     * understates the separation by up to 30%, meaning it
+                     * also changes 30% less than the fingers actually
+                     * converge. Paired with a Manhattan travel sum, which
+                     * OVERstates diagonal motion by up to 41%, both errors
+                     * pushed the same way and a diagonal pinch was read as
+                     * a scroll. Straight-on pinches were unaffected, which
+                     * is why the fault looked like a finger-distance
+                     * problem rather than a geometry one. */
+                    const int pdx = (int)x - (int)x2;
+                    const int pdy = (int)y - (int)y2;
+                    const int gap = (int)sqrtf((float)(pdx * pdx + pdy * pdy));
                     if (sc_n == 2) {
                         pinch_acc += gap - pinch_gap;
-                        if (!scroll_clicked || pinch_lock) {
+                        /* CLASSIFICATION WINDOW. While undecided, scroll is
+                         * withheld (see the scroll accumulate below), so the
+                         * two readings are compared before anything at all
+                         * has been emitted - the only way the same gesture
+                         * cannot come out as a scroll one time and a zoom
+                         * the next.
+                         *
+                         * This window used to exist by accident: the old
+                         * gate was "zoom until the first scroll click", and
+                         * at a divisor of 112 that first click was 112 units
+                         * of travel away. Dropping the divisor to 3 for
+                         * native pixel scroll shrank it to nothing, which is
+                         * what killed zoom. Making it explicit means scroll
+                         * speed and gesture classification stop being
+                         * secretly coupled. */
+                        if (two_class == TWO_UNDECIDED) {
+                            /* Euclidean too, so travel and gap are the same
+                             * kind of measurement and the ratio between them
+                             * means something. */
+                            const int tdx = cx - sc_cx;
+                            const int tdy = cy - sc_cy;
+                            cls_travel += (int)sqrtf((float)(tdx * tdx + tdy * tdy));
+                            if (cls_travel + abs(pinch_acc) >= DIGITIZER_TWO_EVIDENCE_UNITS) {
+                                two_class = (abs(pinch_acc) * DIGITIZER_ZOOM_RATIO_DEN > cls_travel * DIGITIZER_ZOOM_RATIO_NUM) ? TWO_ZOOM : TWO_SCROLL;
+                                if (two_class == TWO_ZOOM) pinch_lock = true; /* also suppresses scroll */
+                                if (digitizer_gesture_trace) {
+                                    /* pdx/pdy show how the pair is oriented:
+                                     * both large = diagonal (thumb ahead of
+                                     * index), one near zero = side by side. */
+                                    uprintf("GCLS %s pacc=%d trav=%d gap=%d pdx=%d pdy=%d dt=%lu\n", two_class == TWO_ZOOM ? "zoom" : "scrl", pinch_acc, cls_travel, gap, abs(pdx), abs(pdy), pair_t ? timer_elapsed32(pair_t) : 0);
+                                }
+                            }
+                        }
+                        if (two_class == TWO_ZOOM) {
                             while (pinch_acc > DIGITIZER_PINCH_STEP_UNITS) {
                                 tap_code16(digitizer_pinch_in_kc);
                                 pinch_acc -= DIGITIZER_PINCH_STEP_UNITS;
@@ -956,7 +1055,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                         coast_v16v   = 0;
                     }
                 }
-                if (!scr_anch && !pinch_lock) {
+                /* Withhold scroll until a two-finger gesture has been
+                 * classified: emitting even one click first is what let a
+                 * zoom start out as a scroll. Nothing is lost, the travel
+                 * is still accumulated below on the very next report. */
+                if (!scr_anch && !pinch_lock && !(contacts == 2 && two_class == TWO_UNDECIDED)) {
                     scroll_acc_h += (cx - sc_cx) * DIGITIZER_SCROLL_SCALE;
                     scroll_acc_v += (cy - sc_cy) * DIGITIZER_SCROLL_SCALE;
                     /* a MERGED blob that keeps travelling keeps the scroll
@@ -989,6 +1092,20 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                     /* axis lock on the accumulated travel */
                     if (abs(scroll_acc_v) >= 2 * abs(scroll_acc_h)) sh = 0;
                     else if (abs(scroll_acc_h) >= 2 * abs(scroll_acc_v)) sv = 0;
+                    /* Anti-backlash. A lifting finger's contact patch
+                     * shrinks and its reported position drifts, dragging
+                     * the pair centroid against the direction of travel -
+                     * the page visibly springs back as the gesture ends.
+                     * MEASURED: every reversal in a session sat 1-3 clicks
+                     * and immediately preceded a contact-count change.
+                     * Withhold a small against-the-grain click rather than
+                     * dropping it: the travel stays in the accumulator, so
+                     * a genuine change of direction clears the threshold
+                     * within a few clicks and still gets through. */
+                    if (scr_dir_v && sv && ((sv > 0) != (scr_dir_v > 0)) && abs(sv) < DIGITIZER_SCROLL_BACKLASH_CLICKS) sv = 0;
+                    if (scr_dir_h && sh && ((sh > 0) != (scr_dir_h > 0)) && abs(sh) < DIGITIZER_SCROLL_BACKLASH_CLICKS) sh = 0;
+                    if (sv) scr_dir_v = sv > 0 ? 1 : -1;
+                    if (sh) scr_dir_h = sh > 0 ? 1 : -1;
                     if (sh || sv) {
                         scroll_clicked = true;
                         scroll_acc_h -= sh * (int)digitizer_scroll_divisor;
