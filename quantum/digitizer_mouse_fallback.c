@@ -121,6 +121,18 @@
  * over roughly a third of a second and its total distance is simply
  * launch velocity x that time - proportional to how hard it was thrown,
  * which is the whole point. Raise to stop sooner. */
+/* Emission ticks over which one sensor report's travel is spread, and
+ * how many clicks the reservoir may hold. The sensor reports roughly
+ * every 25ms and emission runs every 8ms, so about three ticks pass
+ * between reports - spread over that many and the output is continuous
+ * at tick rate rather than lumpy at report rate. The reservoir must be
+ * deep enough to hold a fast report without clipping it. */
+#    ifndef DIGITIZER_SCROLL_SMOOTH_TICKS
+#        define DIGITIZER_SCROLL_SMOOTH_TICKS 3
+#    endif
+#    ifndef DIGITIZER_SCROLL_RESERVOIR_CLICKS
+#        define DIGITIZER_SCROLL_RESERVOIR_CLICKS 24
+#    endif
 #    ifndef DIGITIZER_COAST_FRICTION_PER_MS
 #        define DIGITIZER_COAST_FRICTION_PER_MS 3
 #    endif
@@ -1114,9 +1126,13 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 }
                 sc_cx = cx;
                 sc_cy = cy;
-                /* Clamp the backlog: a fast flick's speed is preserved as
-                 * VELOCITY (below), never as a queue of stale clicks. */
-                const int acc_max = 6 * (int)digitizer_scroll_divisor;
+                /* Reservoir, not a backlog to be feared. It has to hold one
+                 * sensor report's worth of travel, because the sensor
+                 * reports every ~25ms while emission ticks every 8ms: at
+                 * 6 clicks a fast report carrying ~50 units was clamped to
+                 * 18 and roughly two thirds of the motion was thrown away.
+                 * That is why fast scrolling under-tracked the finger. */
+                const int acc_max = DIGITIZER_SCROLL_RESERVOIR_CLICKS * (int)digitizer_scroll_divisor;
                 if (scroll_acc_h > acc_max) scroll_acc_h = acc_max;
                 if (scroll_acc_h < -acc_max) scroll_acc_h = -acc_max;
                 if (scroll_acc_v > acc_max) scroll_acc_v = acc_max;
@@ -1127,8 +1143,21 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                  * conversion honors it) - speed is linear in finger speed
                  * at every speed, remainder carries, no rate ceiling. */
                 if (timer_elapsed32(scroll_click_t) >= digitizer_scroll_interval_ms) {
-                    int sh = scroll_acc_h / (int)digitizer_scroll_divisor;
-                    int sv = scroll_acc_v / (int)digitizer_scroll_divisor;
+                    /* Spread each report across the ticks that follow it
+                     * instead of emitting it whole. The sensor speaks at
+                     * ~40Hz and we emit at ~125Hz, so dumping a report's
+                     * travel into one tick produces a 50px lump every 25ms
+                     * where Apple gives 16px every 8ms - the same speed,
+                     * three times chunkier, which is what reads as the
+                     * scroll slipping when moving fast. Draining a share
+                     * per tick smooths the output without changing how far
+                     * the page goes: the remainder simply waits here.
+                     * The floor keeps a slow drag from stalling once the
+                     * reservoir holds less than one tick's share. */
+                    int sh = (scroll_acc_h / (int)digitizer_scroll_divisor) / DIGITIZER_SCROLL_SMOOTH_TICKS;
+                    int sv = (scroll_acc_v / (int)digitizer_scroll_divisor) / DIGITIZER_SCROLL_SMOOTH_TICKS;
+                    if (!sh && abs(scroll_acc_h) >= (int)digitizer_scroll_divisor) sh = scroll_acc_h > 0 ? 1 : -1;
+                    if (!sv && abs(scroll_acc_v) >= (int)digitizer_scroll_divisor) sv = scroll_acc_v > 0 ? 1 : -1;
                     if (sh > 100) sh = 100;
                     if (sh < -100) sh = -100;
                     if (sv > 100) sv = 100;
